@@ -1,0 +1,171 @@
+name: 1. Promote Feature to Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      feature_branch:
+        description: "Feature branch name (example: feature/edp_opt_JIRA-123)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: feature-to-dev
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dev branch
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0          
+
+      - name: Validate feature branch exists
+        run: |
+          FEATURE="${{ github.event.inputs.feature_branch }}"
+          if ! git ls-remote --heads origin "$FEATURE" | grep -q "refs/heads/"; then
+            echo "ERROR: Feature branch does not exist: $FEATURE"
+            exit 1
+          fi
+
+      - name: Fetch feature branch
+        run: |
+          git fetch origin "${{ github.event.inputs.feature_branch }}"
+
+      - name: Ensure feature branch is up to date with dev
+        run: |
+          FEATURE="${{ github.event.inputs.feature_branch }}"
+          if ! git merge-base --is-ancestor origin/dev "origin/$FEATURE"; then
+            echo "ERROR: Feature branch is behind dev. Please merge dev into feature."
+            exit 1
+          fi
+
+      - name: Extract Jira ID
+        id: jira
+        run: |
+          FEATURE="${{ github.event.inputs.feature_branch }}"
+          JIRA_ID=$(echo "$FEATURE" | grep -oE "JIRA-[0-9]+")
+          if [ -z "$JIRA_ID" ]; then
+            echo "ERROR: Jira ID not found in branch name."
+            exit 1
+          fi
+          echo "jira_id=$JIRA_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Check for differences
+        id: diffcheck
+        run: |
+          FEATURE="${{ github.event.inputs.feature_branch }}"
+          if git diff --quiet origin/dev "origin/$FEATURE"; then
+            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_diff=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop if no differences
+        if: steps.diffcheck.outputs.has_diff == 'false'
+        run: |
+          echo "No differences detected. PR will not be created."
+          exit 1
+
+      - name: Prevent duplicate PR
+        run: |
+          FEATURE="${{ github.event.inputs.feature_branch }}"
+          COUNT=$(curl -s \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&head=${{ github.repository_owner }}:$FEATURE&base=dev" \
+            | jq length)
+          if [ "$COUNT" -gt 0 ]; then
+            echo "ERROR: An open PR already exists for this feature branch."
+            exit 1
+          fi
+
+      - name: Prepare PR data
+        id: prepare
+        run: |
+          FEATURE="${{ github.event.inputs.feature_branch }}"
+          FILES=$(git diff --name-only origin/dev "origin/$FEATURE")
+          FILE_COUNT=$(echo "$FILES" | grep -c . || true)
+          COMMITS=$(git log origin/dev..origin/$FEATURE --pretty=format:"- %s (%h)" || true)
+
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "file_count=$FILE_COUNT" >> "$GITHUB_OUTPUT"
+
+          echo "commits<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$COMMITS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        id: create_pr
+        run: |
+          FEATURE="${{ github.event.inputs.feature_branch }}"
+          JIRA="${{ steps.jira.outputs.jira_id }}"
+          FILES="${{ steps.prepare.outputs.files }}"
+          COUNT="${{ steps.prepare.outputs.file_count }}"
+          COMMITS="${{ steps.prepare.outputs.commits }}"
+
+          BODY=$(printf "%s\n" \
+            "Automated Feature to Dev Promotion" \
+            "" \
+            "Jira ID: $JIRA" \
+            "Source Branch: $FEATURE" \
+            "Target Branch: dev" \
+            "" \
+            "Changed Files ($COUNT):" \
+            "$FILES" \
+            "" \
+            "Commit Messages:" \
+            "$COMMITS" \
+            "" \
+            "IMPORTANT: Use this PR ID for Dev to UAT promotion."
+          )
+
+          PAYLOAD=$(jq -n \
+            --arg title "[$JIRA] Promote $FEATURE to dev" \
+            --arg head "$FEATURE" \
+            --arg base "dev" \
+            --arg body "$BODY" \
+            '{title:$title, head:$head, base:$base, body:$body}')
+
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls")
+
+          PR=$(echo "$RESPONSE" | jq -r '.number')
+          if [ "$PR" = "null" ]; then
+            echo "ERROR: PR creation failed"
+            echo "$RESPONSE"
+            exit 1
+          fi
+
+          echo "pr_number=$PR" >> "$GITHUB_OUTPUT"
+
+      - name: Append PR ID to body
+        run: |
+          PR="${{ steps.create_pr.outputs.pr_number }}"
+          curl -s -X PATCH \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg body \"PR ID (use for Dev to UAT promotion): $PR\" '{body:$body}')" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR"
+
+      - name: Apply labels
+        run: |
+          PR="${{ steps.create_pr.outputs.pr_number }}"
+          JIRA="${{ steps.jira.outputs.jira_id }}"
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg j "$JIRA" '{labels: [$j, "feature-to-dev"]}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/$PR/labels"
