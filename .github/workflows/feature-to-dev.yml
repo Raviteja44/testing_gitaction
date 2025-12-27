@@ -151,15 +151,6 @@ jobs:
 
           echo "pr_number=$PR" >> "$GITHUB_OUTPUT"
 
-      - name: Append PR ID to body
-        run: |
-          PR="${{ steps.create_pr.outputs.pr_number }}"
-          curl -s -X PATCH \
-            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg body "PR ID (use for Dev to UAT promotion): $PR" '{body:$body}')" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR"
-
       - name: Apply labels
         run: |
           PR="${{ steps.create_pr.outputs.pr_number }}"
