@@ -73,6 +73,20 @@ jobs:
           echo "source_pr=$INPUT_PR" >> $GITHUB_OUTPUT
           echo "source_branch=$SOURCE_BRANCH" >> $GITHUB_OUTPUT
 
+      - name: Check for existing open promotion PRs
+        run: |
+          SOURCE_PR="${{ steps.pr.outputs.source_pr }}"
+          OPEN_PR=$(curl -s \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&base=uat" \
+            | jq -r --arg srcpr "$SOURCE_PR" '.[] | select(.body | test("Source PR ID that merged changes into dev: #\($srcpr)")) | .number' )
+
+          if [ -n "$OPEN_PR" ]; then
+            echo "ERROR: Open Dev to UAT PR already exists for source PR #$SOURCE_PR: PR #$OPEN_PR"
+            exit 1
+          fi
+
       - name: Ensure change not already in UAT (ancestry + patch)
         run: |
           git fetch origin uat
@@ -126,8 +140,8 @@ jobs:
           S3_PATH="${{ github.event.inputs.dev_test_s3_path }}"
           [ -z "$S3_PATH" ] && S3_PATH="Not provided"
 
-          # PR body content
-          BODY=$(printf "%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n" \
+          # Body content
+          BODY=$(printf "%s\n\n%s\n%s\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n" \
             "Automated Dev → UAT Promotion" \
             "Jira ID: ${{ steps.pr.outputs.jira_id }}" \
             "Source Branch: dev" \
@@ -139,12 +153,12 @@ jobs:
             "IMPORTANT: Use this PR ID for UAT → PROD promotion."
           )
 
-          # PR title uses newly created PR number (to be filled after creation)
-          TITLE="[${{ steps.pr.outputs.jira_id }}] Promote Dev changes to UAT"
+          # Initial PR title
+          BASE_TITLE="[${{ steps.pr.outputs.jira_id }}] Promote Dev changes to UAT"
 
           # Create PR
           PAYLOAD=$(jq -n \
-            --arg title "$TITLE" \
+            --arg title "$BASE_TITLE" \
             --arg head "${{ steps.branch.outputs.branch }}" \
             --arg base "uat" \
             --arg body "$BODY" \
@@ -157,20 +171,17 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/pulls")
 
           CREATED_PR=$(echo "$RESPONSE" | jq -r '.number')
-          echo "pr=$CREATED_PR" >> $GITHUB_OUTPUT
 
-      - name: Update PR title with created PR ID
-        if: steps.create_pr.outputs.pr != ''
-        run: |
-          CREATED_PR="${{ steps.create_pr.outputs.pr }}"
-          JIRA_ID="${{ steps.pr.outputs.jira_id }}"
-          NEW_TITLE="[${JIRA_ID}] Promote Dev changes to UAT (PR ID #${CREATED_PR})"
+          # Update PR title immediately with created PR ID
+          NEW_TITLE="[${{ steps.pr.outputs.jira_id }}] Promote Dev changes to UAT (PR ID #${CREATED_PR})"
 
           curl -s -X PATCH \
             -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "{\"title\":\"${NEW_TITLE}\"}" \
             "https://api.github.com/repos/${{ github.repository }}/pulls/${CREATED_PR}"
+
+          echo "pr=$CREATED_PR" >> $GITHUB_OUTPUT
 
       - name: Apply Jira and environment labels
         if: steps.create_pr.outputs.pr != ''
@@ -191,5 +202,5 @@ jobs:
       - name: Completed
         if: steps.create_pr.outputs.pr != ''
         run: |
-          echo "Promotion Dev → UAT completed successfully."
+          echo "Promotion Dev to UAT completed successfully."
           echo "Created PR: #${{ steps.create_pr.outputs.pr }}"
