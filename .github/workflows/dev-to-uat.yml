@@ -134,7 +134,7 @@ jobs:
         run: |
           git push origin "${{ steps.branch.outputs.branch }}"
 
-      - name: Create PR into UAT with correct title
+      - name: Create PR into UAT 
         id: create_pr
         run: |
           S3_PATH="${{ github.event.inputs.dev_test_s3_path }}"
@@ -152,7 +152,7 @@ jobs:
             "IMPORTANT: Use this PR ID for UAT → PROD promotion."
           )
 
-          BASE_TITLE="[${{ steps.pr.outputs.jira_id }}] Promote Dev changes to UAT"
+          BASE_TITLE="[${{ steps.pr.outputs.jira_id }}] Promote Dev changes to UAT (PR ID)"
 
           # Create PR
           RESPONSE=$(curl -s -X POST \
@@ -161,16 +161,7 @@ jobs:
             -d "$(jq -n --arg title "$BASE_TITLE" --arg head "${{ steps.branch.outputs.branch }}" --arg base "uat" --arg body "$BODY" '{title:$title, head:$head, base:$base, body:$body}')" \
             "https://api.github.com/repos/${{ github.repository }}/pulls")
 
-          CREATED_PR=$(echo "$RESPONSE" | jq -r '.number')
-
-          # Update PR title
-          FINAL_TITLE="[${{ steps.pr.outputs.jira_id }}] Promote Dev changes to UAT PR ID "
-          curl -s -X PATCH \
-            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"title\":\"${FINAL_TITLE}\"}" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls/${CREATED_PR}"
-
+          CREATED_PR=$(echo "$RESPONSE" | jq -r '.number')       
           echo "pr=$CREATED_PR" >> $GITHUB_OUTPUT
 
       - name: Apply Jira and environment labels
