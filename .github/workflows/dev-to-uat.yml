@@ -164,7 +164,7 @@ jobs:
           CREATED_PR=$(echo "$RESPONSE" | jq -r '.number')
 
           # Update PR title
-          FINAL_TITLE="[${{ steps.pr.outputs.jira_id }}] Promote Dev changes to UAT PR ID #${CREATED_PR}"
+          FINAL_TITLE="[${{ steps.pr.outputs.jira_id }}] Promote Dev changes to UAT PR ID "
           curl -s -X PATCH \
             -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
             -H "Content-Type: application/json" \
