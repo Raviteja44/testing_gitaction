@@ -1,2 +1,2 @@
-new file sample2.txt
+new file sample2.text
 --added line by JIRA-003
