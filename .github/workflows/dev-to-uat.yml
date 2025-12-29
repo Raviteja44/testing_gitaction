@@ -99,7 +99,7 @@ jobs:
 
           if [ -n "$EXISTING" ]; then
             echo "PR #$SRC_PR already promoted via UAT PR #$EXISTING"
-            exit 0
+            exit 1
           fi
 
       - name: Create promotion branch
@@ -118,7 +118,7 @@ jobs:
             if git status | grep -q "nothing to commit"; then
               echo "No-op cherry-pick: changes already present in UAT."
               git cherry-pick --skip
-              exit 0
+              exit 1
             fi
 
             git cherry-pick --abort
