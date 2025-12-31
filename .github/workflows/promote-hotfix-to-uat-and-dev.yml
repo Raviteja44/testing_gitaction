@@ -1,7 +1,7 @@
 name: Sync Hotfix → UAT → DEV
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
     branches:
       - prod
@@ -168,3 +168,4 @@ jobs:
           echo "Hotfix sync PRs created successfully."
           echo "UAT PR: #${{ steps.pr_uat.outputs.pr }}"
           echo "DEV PR: #${{ steps.pr_dev.outputs.pr }}"
+
