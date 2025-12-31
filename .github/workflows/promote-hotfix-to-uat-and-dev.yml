@@ -26,6 +26,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          
+      - name: Setup Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Extract Jira ID
         id: jira
@@ -168,5 +173,6 @@ jobs:
           echo "Hotfix sync PRs created successfully."
           echo "UAT PR: #${{ steps.pr_uat.outputs.pr }}"
           echo "DEV PR: #${{ steps.pr_dev.outputs.pr }}"
+
 
 
