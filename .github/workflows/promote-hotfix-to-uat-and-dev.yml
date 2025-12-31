@@ -55,7 +55,7 @@ jobs:
 
           BRANCH="sync/${{ steps.jira.outputs.jira }}-prod-to-uat-$(date +%s)"
           git checkout -b "$BRANCH" origin/uat
-          git cherry-pick -x "$PROD_SHA"
+          git cherry-pick -x -m 1 "$PROD_SHA"
           git push origin "$BRANCH"
 
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
@@ -116,7 +116,7 @@ jobs:
 
           BRANCH="sync/${{ steps.jira.outputs.jira }}-prod-to-dev-$(date +%s)"
           git checkout -b "$BRANCH" origin/dev
-          git cherry-pick -x "$PROD_SHA"
+          git cherry-pick -x -m 1 "$PROD_SHA"
           git push origin "$BRANCH"
 
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
@@ -168,4 +168,5 @@ jobs:
           echo "Hotfix sync PRs created successfully."
           echo "UAT PR: #${{ steps.pr_uat.outputs.pr }}"
           echo "DEV PR: #${{ steps.pr_dev.outputs.pr }}"
+
 
