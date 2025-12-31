@@ -1,0 +1,142 @@
+name: Hotfix → Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      hotfix_branch:
+        description: "Hotfix branch (e.g. hotfix/JIRA-001)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: hotfix-prod
+  cancel-in-progress: false
+
+jobs:
+  hotfix:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify manager authorization
+        run: |
+          ACTOR="${{ github.actor }}"
+          echo "Triggered by: $ACTOR"
+
+          if ! grep -qx "$ACTOR" .hotfix-managers; then
+            echo "ERROR: Only users listed in .hotfix-managers can trigger hotfix workflow."
+            exit 1
+          fi
+
+      - name: Validate hotfix branch
+        run: |
+          git fetch origin
+          if ! git show-ref --verify --quiet "refs/remotes/origin/${{ github.event.inputs.hotfix_branch }}"; then
+            echo "ERROR: Hotfix branch does not exist."
+            exit 1
+          fi
+
+      - name: Collect hotfix details
+        id: details
+        run: |
+          BRANCH="${{ github.event.inputs.hotfix_branch }}"
+          JIRA_ID=$(echo "$BRANCH" | grep -oE "JIRA-[0-9]+")
+
+          if [ -z "$JIRA_ID" ]; then
+            echo "ERROR: Jira ID not found in hotfix branch name."
+            exit 1
+          fi
+
+          git fetch origin prod
+
+          # Collect commit messages
+          COMMITS=$(git log --pretty=format:"- %s (%h)" origin/prod..origin/$BRANCH)
+
+          if [ -z "$COMMITS" ]; then
+            echo "ERROR: No commits found in hotfix branch."
+            exit 1
+          fi
+
+          # Collect changed files
+          FILES=$(git diff --name-only origin/prod..origin/$BRANCH)
+          COUNT=$(echo "$FILES" | grep -c . || true)
+
+          echo "jira=$JIRA_ID" >> $GITHUB_OUTPUT
+          echo "file_count=$COUNT" >> $GITHUB_OUTPUT
+
+          echo "commits<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Hotfix PR into prod
+        id: create_pr
+        run: |
+          BODY=$(printf "%s\n" \
+            "**Emergency Hotfix Promotion**" \
+            "" \
+            "Jira ID: ${{ steps.details.outputs.jira }}" \
+            "Source Branch: ${{ github.event.inputs.hotfix_branch }}" \
+            "Target Branch: prod" \
+            "" \
+            "Commit Messages:" \
+            "${{ steps.details.outputs.commits }}" \
+            "" \
+            "**Changed Files (${{ steps.details.outputs.file_count }}):**" \
+            "${{ steps.details.outputs.files }}" \
+            "" \
+            "IMPORTANT:" \
+            "- This hotfix will be auto-synced to UAT and DEV after merge." \
+            "- Please review carefully before approval."
+          )
+
+          PAYLOAD=$(jq -n \
+            --arg title "[HOTFIX][${{ steps.details.outputs.jira }}] ${{ github.event.inputs.hotfix_branch }} → prod" \
+            --arg head "${{ github.event.inputs.hotfix_branch }}" \
+            --arg base "prod" \
+            --arg body "$BODY" \
+            '{title:$title, head:$head, base:$base, body:$body}')
+
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls")
+
+          PR_NUM=$(echo "$RESPONSE" | jq -r '.number')
+          if [ "$PR_NUM" = "null" ]; then
+            echo "ERROR: Failed to create PR."
+            exit 1
+          fi
+
+          echo "pr=$PR_NUM" >> $GITHUB_OUTPUT
+
+      - name: Apply hotfix labels
+        if: steps.create_pr.outputs.pr != ''
+        run: |
+          jq -n \
+            --arg j "${{ steps.details.outputs.jira }}" \
+            '{labels: ["hotfix", "prod", $j]}' > labels.json
+
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d @labels.json \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_pr.outputs.pr }}/labels"
+
+      - name: Completed
+        if: steps.create_pr.outputs.pr != ''
+        run: |
+          echo "Hotfix → Prod workflow completed successfully."
+          echo "Created PR: #${{ steps.create_pr.outputs.pr }}"
