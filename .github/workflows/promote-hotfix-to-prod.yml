@@ -1,4 +1,4 @@
-name: Hotfix → Prod
+name: 5. Hotfix → Prod
 
 on:
   workflow_dispatch:
@@ -140,3 +140,4 @@ jobs:
         run: |
           echo "Hotfix → Prod workflow completed successfully."
           echo "Created PR: #${{ steps.create_pr.outputs.pr }}"
+
