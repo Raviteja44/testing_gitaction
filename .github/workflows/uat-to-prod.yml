@@ -1,0 +1,197 @@
+name: 3. Promote UAT → PROD
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number merged into UAT"
+        required: true
+        type: number
+      uat_test_s3_path:
+        description: "S3 path containing UAT testing results (optional)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: promote-uat-to-prod
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup git and tools
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch and validate PR
+        id: pr
+        run: |
+          INPUT_PR="${{ github.event.inputs.pr_number }}"
+
+          PR_JSON=$(curl -s \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${INPUT_PR}")
+
+          if [ "$(echo "$PR_JSON" | jq -r '.merged')" != "true" ]; then
+            echo "ERROR: PR is not merged."
+            exit 1
+          fi
+
+          if [ "$(echo "$PR_JSON" | jq -r '.base.ref')" != "uat" ]; then
+            echo "ERROR: PR not merged into uat."
+            exit 1
+          fi
+
+          MERGE_SHA=$(echo "$PR_JSON" | jq -r '.merge_commit_sha')
+          TITLE=$(echo "$PR_JSON" | jq -r '.title')
+          BODY=$(echo "$PR_JSON" | jq -r '.body')
+          SOURCE_BRANCH=$(echo "$PR_JSON" | jq -r '.head.ref')
+          JIRA_ID=$(echo "$TITLE $BODY" | grep -oE "JIRA-[0-9]+" | head -1)
+
+          if [ -z "$JIRA_ID" ]; then
+            echo "ERROR: Jira ID missing."
+            exit 1
+          fi
+
+          echo "merge_commit=$MERGE_SHA" >> $GITHUB_OUTPUT
+          echo "jira_id=$JIRA_ID" >> $GITHUB_OUTPUT
+          echo "source_pr=$INPUT_PR" >> $GITHUB_OUTPUT
+          echo "source_branch=$SOURCE_BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Check for existing open promotion PRs
+        run: |
+          SOURCE_PR="${{ steps.pr.outputs.source_pr }}"
+
+          OPEN_PR=$(curl -s \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&base=prod" \
+            | jq -r --arg srcpr "$SOURCE_PR" \
+              '.[] | select(.body | test("Source PR ID that merged changes into uat: #\($srcpr)")) | .number')
+
+          if [ -n "$OPEN_PR" ]; then
+            echo "ERROR: Open UAT → PROD PR already exists for source PR #$SOURCE_PR: PR #$OPEN_PR"
+            exit 1
+          fi
+
+      - name: Prevent duplicate promotion
+        run: |
+          SRC_PR="${{ steps.pr.outputs.source_pr }}"
+
+          EXISTING=$(curl -s \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls?base=prod&state=all" \
+            | jq -r --arg pr "#$SRC_PR" \
+              '.[] | select(.body | contains("Source PR ID that merged changes into uat: " + $pr)) | .number')
+
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$SRC_PR already promoted via PROD PR #$EXISTING"
+            exit 1
+          fi
+
+      - name: Create promotion branch
+        id: branch
+        run: |
+          TS=$(date +%s)
+          BRANCH="promote/${{ steps.pr.outputs.jira_id }}-uat-pr${{ steps.pr.outputs.source_pr }}-${TS}"
+          git checkout -b "$BRANCH" origin/prod
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Apply merge commit
+        run: |
+          COMMIT="${{ steps.pr.outputs.merge_commit }}"
+
+          git cherry-pick -x -m 1 "$COMMIT" || {
+            if git status | grep -q "nothing to commit"; then
+              echo "No-op cherry-pick: changes already present in PROD."
+              git cherry-pick --skip
+              exit 1
+            fi
+
+            git cherry-pick --abort
+            echo "ERROR: Conflict detected."
+            exit 1
+          }
+
+      - name: Collect change details
+        id: changes
+        run: |
+          FILES=$(git show --name-only --pretty="" HEAD)
+          COUNT=$(echo "$FILES" | grep -c . || true)
+
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "file_count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Push promotion branch
+        run: |
+          git push origin "${{ steps.branch.outputs.branch }}"
+
+      - name: Create PR into PROD
+        id: create_pr
+        run: |
+          S3_PATH="${{ github.event.inputs.uat_test_s3_path }}"
+          [ -z "$S3_PATH" ] && S3_PATH="Not provided"
+
+          BODY=$(printf "%s\n\n%s\n%s\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n" \
+            "Automated UAT → PROD Promotion" \
+            "Jira ID: ${{ steps.pr.outputs.jira_id }}" \
+            "Source Branch: uat" \
+            "Target Branch: prod" \
+            "Source PR ID that merged changes into uat: #${{ steps.pr.outputs.source_pr }}" \
+            "Changed Files (${{ steps.changes.outputs.file_count }}):" \
+            "${{ steps.changes.outputs.files }}" \
+            "UAT Testing Evidence (S3): $S3_PATH" \
+            "IMPORTANT: Production approval required before merge."
+          )
+
+          TITLE="[${{ steps.pr.outputs.jira_id }}] Promote UAT changes to PROD"
+
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg title "$TITLE" \
+              --arg head "${{ steps.branch.outputs.branch }}" \
+              --arg base "prod" \
+              --arg body "$BODY" \
+              '{title:$title, head:$head, base:$base, body:$body}')" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls")
+
+          CREATED_PR=$(echo "$RESPONSE" | jq -r '.number')
+          echo "pr=$CREATED_PR" >> $GITHUB_OUTPUT
+
+      - name: Apply Jira and environment labels
+        if: steps.create_pr.outputs.pr != ''
+        run: |
+          PR="${{ steps.create_pr.outputs.pr }}"
+          JIRA_ID="${{ steps.pr.outputs.jira_id }}"
+
+          LABELS=$(jq -n '{labels: ["'"$JIRA_ID"'", "uat-to-prod"]}')
+
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.PAT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$LABELS" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${PR}/labels"
+
+      - name: Completed
+        if: steps.create_pr.outputs.pr != ''
+        run: |
+          echo "Promotion UAT → PROD completed successfully."
+          echo "Created PR: #${{ steps.create_pr.outputs.pr }}"
